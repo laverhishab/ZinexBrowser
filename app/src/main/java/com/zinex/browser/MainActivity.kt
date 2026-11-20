@@ -20,7 +20,10 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.content.ContentValues
 import android.net.Uri
+import android.provider.MediaStore
+import android.util.Base64
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -35,6 +38,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
+import android.webkit.MimeTypeMap
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -583,6 +587,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            setOnLongClickListener {
+                val hit = hitTestResult
+                val extra = hit.extra
+                if ((hit.type == WebView.HitTestResult.IMAGE_TYPE ||
+                        hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) && !extra.isNullOrBlank()
+                ) {
+                    showImageSheet(extra, privateMode)
+                    true
+                } else {
+                    false
+                }
+            }
+
             setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
                 requestDownload(url, userAgent, contentDisposition, mimeType)
             })
@@ -631,6 +648,64 @@ class MainActivity : ComponentActivity() {
             storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         } else {
             startDownload(url, userAgent, contentDisposition, mimeType)
+        }
+    }
+
+    private fun showImageSheet(src: String, privateMode: Boolean) {
+        val rows = mutableListOf<SheetRow>()
+        rows.add(SheetRow("Download image", "Save to your Downloads folder", { downloadImage(src) }))
+        if (src.startsWith("http")) {
+            rows.add(SheetRow("Open image in new tab", "View the full image", { addTab(false, src, privateMode) }))
+        }
+        showSheet("Image", rows, emptyList(), null)
+    }
+
+    private fun downloadImage(src: String) {
+        when {
+            src.startsWith("data:") -> saveDataImage(src)
+            src.startsWith("http") -> {
+                val ext = MimeTypeMap.getFileExtensionFromUrl(src)
+                val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext?.lowercase() ?: "") ?: "image/jpeg"
+                requestDownload(src, currentWebView()?.settings?.userAgentString, null, mime)
+            }
+            else -> toast("This image can't be downloaded")
+        }
+    }
+
+    private fun saveDataImage(dataUri: String) {
+        if (Build.VERSION.SDK_INT <= 28 &&
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingDownload = { saveDataImage(dataUri) }
+            storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            return
+        }
+        try {
+            val comma = dataUri.indexOf(',')
+            if (comma < 0) throw IllegalArgumentException("bad image data")
+            val header = dataUri.substring(5, comma)
+            val body = dataUri.substring(comma + 1)
+            val mime = header.substringBefore(';').ifEmpty { "image/jpeg" }
+            val bytes = if (header.contains(";base64")) Base64.decode(body, Base64.DEFAULT) else Uri.decode(body).toByteArray()
+            val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "jpg"
+            val name = "zinex_" + System.currentTimeMillis() + "." + ext
+            if (Build.VERSION.SDK_INT >= 29) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, name)
+                    put(MediaStore.Downloads.MIME_TYPE, mime)
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                }
+                val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: throw IllegalStateException("can't create file")
+                contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+            } else {
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                dir.mkdirs()
+                File(dir, name).outputStream().use { it.write(bytes) }
+            }
+            toast("Saved to Downloads: $name")
+        } catch (e: Exception) {
+            toast("Download failed: ${e.message}")
         }
     }
 
