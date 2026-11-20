@@ -50,13 +50,13 @@ class MainActivity : ComponentActivity() {
 
     private val filePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
-        val uris = if (result.resultCode == RESULT_OK) {
+        val uris: Array<Uri> = if (result.resultCode == RESULT_OK) {
             when {
                 data?.clipData != null -> Array(data.clipData!!.itemCount) { i -> data.clipData!!.getItemAt(i).uri }
                 data?.data != null -> arrayOf(data.data!!)
-                else -> emptyArray()
+                else -> emptyArray<Uri>()
             }
-        } else emptyArray()
+        } else emptyArray<Uri>()
         fileCallback?.onReceiveValue(uris)
         fileCallback = null
     }
@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(10), dp(5), dp(10), dp(5))
         }
         addressBar = EditText(this).apply {
-            singleLine = true
+            setSingleLine(true)
             textSize = 14f
             hint = "Search or enter website"
             imeOptions = EditorInfo.IME_ACTION_GO
@@ -140,7 +140,7 @@ class MainActivity : ComponentActivity() {
         textSize = 22f
         gravity = Gravity.CENTER
         setTextColor(if (darkMode) Color.WHITE else Color.rgb(30, 34, 48))
-        setOnClickListener(action)
+        setOnClickListener { v -> action(v) }
         isClickable = true
         isFocusable = true
     }
