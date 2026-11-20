@@ -1,10 +1,10 @@
 <resources>
     <style name="Theme.ZinexBrowser" parent="android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:fontFamily">sans</item>
+        <item name="android:fontFamily">sans-serif</item>
         <item name="android:colorAccent">#6C63FF</item>
-        <item name="android:navigationBarColor">#101321</item>
-        <item name="android:statusBarColor">#101321</item>
-        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">#0F1220</item>
+        <item name="android:statusBarColor">#00000000</item>
+        <item name="android:navigationBarColor">#00000000</item>
         <item name="android:windowActionModeOverlay">true</item>
     </style>
 </resources>
