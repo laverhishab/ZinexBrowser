@@ -8,9 +8,17 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
@@ -49,6 +57,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import java.io.File
 
 private data class BrowserTab(
     val webView: WebView,
@@ -67,6 +76,31 @@ private class SheetRow(
 private class SheetButton(val label: String, val action: () -> Unit)
 
 private class MenuAction(val label: String, val icon: Int, val active: Boolean, val action: () -> Unit)
+
+private class WallpaperDrawable(private val bmp: Bitmap, private val scrim: Int) : Drawable() {
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val scrimPaint = Paint().apply { color = scrim }
+
+    override fun draw(canvas: Canvas) {
+        val b = bounds
+        if (b.isEmpty) return
+        val scale = maxOf(b.width().toFloat() / bmp.width, b.height().toFloat() / bmp.height)
+        val left = b.left + (b.width() - bmp.width * scale) / 2f
+        val top = b.top + (b.height() - bmp.height * scale) / 2f
+        val save = canvas.save()
+        canvas.clipRect(b)
+        canvas.translate(left, top)
+        canvas.scale(scale, scale)
+        canvas.drawBitmap(bmp, 0f, 0f, paint)
+        canvas.restoreToCount(save)
+        canvas.drawRect(b, scrimPaint)
+    }
+
+    override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+    override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun getOpacity(): Int = PixelFormat.OPAQUE
+}
 
 private class MaxHeightScrollView(context: Context, private val maxPx: Int) : ScrollView(context) {
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -95,6 +129,8 @@ class MainActivity : ComponentActivity() {
     private var customView: View? = null
     private var customCallback: WebChromeClient.CustomViewCallback? = null
     private var pendingDownload: (() -> Unit)? = null
+    private var wallpaper: Bitmap? = null
+    private val hasWallpaper: Boolean get() = wallpaper != null
 
     private val accent = Color.parseColor("#6C63FF")
     private val internalBase = "https://zinex.local"
@@ -113,6 +149,10 @@ class MainActivity : ComponentActivity() {
         fileCallback = null
     }
 
+    private val wallpaperPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri != null) importWallpaper(uri)
+    }
+
     private val storagePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val job = pendingDownload
         pendingDownload = null
@@ -126,8 +166,16 @@ class MainActivity : ComponentActivity() {
     // ---------------------------------------------------------------- colors
 
     private fun cBg(): Int = Color.parseColor(if (darkMode) "#0F1220" else "#F3F5FB")
-    private fun cSurface(): Int = Color.parseColor(if (darkMode) "#1A1F36" else "#FFFFFF")
-    private fun cSurface2(): Int = Color.parseColor(if (darkMode) "#262C4A" else "#E7EAF5")
+    private fun cSurface(): Int = Color.parseColor(
+        if (hasWallpaper) (if (darkMode) "#661A1F36" else "#8CFFFFFF") else (if (darkMode) "#1A1F36" else "#FFFFFF")
+    )
+    private fun cSurface2(): Int = Color.parseColor(
+        if (hasWallpaper) (if (darkMode) "#40FFFFFF" else "#80FFFFFF") else (if (darkMode) "#262C4A" else "#E7EAF5")
+    )
+    private fun cSheet(): Int = Color.parseColor(
+        if (hasWallpaper) (if (darkMode) "#CC1A1F36" else "#D9FFFFFF") else (if (darkMode) "#1A1F36" else "#FFFFFF")
+    )
+    private fun cGlassStroke(): Int = Color.parseColor(if (darkMode) "#33FFFFFF" else "#99FFFFFF")
     private fun cText(): Int = Color.parseColor(if (darkMode) "#FFFFFF" else "#1B2033")
     private fun cSub(): Int = Color.parseColor(if (darkMode) "#9AA3C2" else "#6B7391")
 
@@ -136,6 +184,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         darkMode = getSharedPreferences("zinex", MODE_PRIVATE).getBoolean("dark", true)
+        loadWallpaper()
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
@@ -182,7 +231,12 @@ class MainActivity : ComponentActivity() {
     private fun buildInterface() {
         root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(cBg())
+        val wall = wallpaper
+        if (wall != null) {
+            root.background = WallpaperDrawable(wall, Color.parseColor(if (darkMode) "#40000000" else "#14000000"))
+        } else {
+            root.setBackgroundColor(cBg())
+        }
 
         securityIcon = ImageView(this)
         securityIcon.setImageResource(R.drawable.ic_search)
@@ -244,7 +298,7 @@ class MainActivity : ComponentActivity() {
 
         webContainer = LinearLayout(this)
         webContainer.orientation = LinearLayout.VERTICAL
-        webContainer.setBackgroundColor(cBg())
+        webContainer.setBackgroundColor(if (hasWallpaper) Color.TRANSPARENT else cBg())
 
         bottomBar = LinearLayout(this)
         bottomBar.orientation = LinearLayout.HORIZONTAL
@@ -335,6 +389,7 @@ class MainActivity : ComponentActivity() {
         val d = GradientDrawable()
         d.setColor(color)
         d.setCornerRadius(dp(radiusDp).toFloat())
+        if (hasWallpaper) d.setStroke(dp(1), cGlassStroke())
         return d
     }
 
@@ -343,6 +398,7 @@ class MainActivity : ComponentActivity() {
         d.setColor(color)
         val r = dp(radiusDp).toFloat()
         d.setCornerRadii(floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f))
+        if (hasWallpaper) d.setStroke(dp(1), cGlassStroke())
         return d
     }
 
@@ -441,6 +497,9 @@ class MainActivity : ComponentActivity() {
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    if (url != null && url.startsWith("http") && !url.startsWith(internalBase)) {
+                        view?.setBackgroundColor(Color.WHITE)
+                    }
                     val tab = tabs.firstOrNull { it.webView === view }
                     if (tab != null && url != null && !url.startsWith(internalBase)) {
                         tab.errorUrl = null
@@ -697,6 +756,7 @@ class MainActivity : ComponentActivity() {
     // --------------------------------------------------------------- pages
 
     private fun loadHomepage(web: WebView, privateTab: Boolean) {
+        web.setBackgroundColor(if (hasWallpaper) Color.TRANSPARENT else Color.WHITE)
         web.loadDataWithBaseURL("$internalBase/", homeHtml(privateTab), "text/html", "UTF-8", null)
     }
 
@@ -733,6 +793,13 @@ class MainActivity : ComponentActivity() {
         val fg = if (darkMode) "#FFFFFF" else "#1B2033"
         val card = if (darkMode) "#1A1F36" else "#FFFFFF"
         val sub = if (darkMode) "#9AA3C2" else "#6B7391"
+        val glass = hasWallpaper
+        val pageBg = if (glass) "transparent" else bg
+        val cardBg = if (glass) (if (darkMode) "rgba(26,31,54,.45)" else "rgba(255,255,255,.55)") else card
+        val glassCss = if (glass) {
+            ".search{backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,.28)}" +
+                ".item,.tag{text-shadow:0 1px 4px " + (if (darkMode) "rgba(0,0,0,.65)" else "rgba(255,255,255,.7)") + "}"
+        } else ""
         val title = if (privateTab) "Private tab" else "Zinex"
         val tagline = if (privateTab) "History isn't saved in this tab" else "Fast. Simple. Yours."
         val sites = listOf(
@@ -753,16 +820,17 @@ class MainActivity : ComponentActivity() {
             <meta name="viewport" content="width=device-width,initial-scale=1">
             <style>
             *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-            body{margin:0;background:$bg;color:$fg;font-family:Roboto,Arial,sans-serif;min-height:100vh;display:flex;justify-content:center}
+            body{margin:0;background:$pageBg;color:$fg;font-family:Roboto,Arial,sans-serif;min-height:100vh;display:flex;justify-content:center}
             .wrap{width:100%;max-width:520px;padding:64px 22px 24px;text-align:center}
             .logo{font-size:46px;font-weight:800;letter-spacing:-1.5px;margin:0;background:linear-gradient(90deg,#8B83FF,#4FD1C5);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
             .tag{color:$sub;font-size:14px;margin:6px 0 30px}
-            .search{display:flex;align-items:center;background:$card;border-radius:28px;padding:6px 6px 6px 18px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
+            .search{display:flex;align-items:center;background:$cardBg;border-radius:28px;padding:6px 6px 6px 18px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
             .search input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:$fg;font-size:16px;padding:12px 4px}
             .search button{border:0;border-radius:22px;background:#6C63FF;color:#fff;font-size:15px;font-weight:600;padding:12px 20px}
             .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:20px 10px;margin-top:40px}
             .item{text-decoration:none;color:$fg;font-size:12px}
             .ico{width:56px;height:56px;border-radius:18px;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:700;color:#fff}
+            $glassCss
             </style></head><body><div class="wrap">
             <h1 class="logo">$title</h1>
             <div class="tag">$tagline</div>
@@ -796,7 +864,7 @@ class MainActivity : ComponentActivity() {
     private fun newSheetContainer(): LinearLayout {
         val sheet = LinearLayout(this)
         sheet.orientation = LinearLayout.VERTICAL
-        sheet.background = roundedTop(cSurface(), 24)
+        sheet.background = roundedTop(cSheet(), 24)
         sheet.setPadding(dp(18), dp(10), dp(18), dp(26))
         val handle = View(this)
         handle.background = rounded(cSurface2(), 3)
@@ -931,6 +999,7 @@ class MainActivity : ComponentActivity() {
             MenuAction("Copy link", R.drawable.ic_copy, false) { copyLink() },
             MenuAction("Desktop site", R.drawable.ic_desktop, desktopMode) { toggleDesktop() },
             MenuAction(if (darkMode) "Light mode" else "Dark mode", R.drawable.ic_dark, false) { toggleTheme() },
+            MenuAction("Wallpaper", R.drawable.ic_image, hasWallpaper) { showWallpaperSheet() },
             MenuAction("Clear data", R.drawable.ic_delete, false) { showClearData() },
             MenuAction("Close tab", R.drawable.ic_close, false) { closeTab(activeIndex) }
         )
@@ -964,6 +1033,7 @@ class MainActivity : ComponentActivity() {
         val oval = GradientDrawable()
         oval.setShape(GradientDrawable.OVAL)
         oval.setColor(if (item.active) accent else cSurface2())
+        if (hasWallpaper) oval.setStroke(dp(1), cGlassStroke())
         icon.background = oval
         cell.addView(icon, LinearLayout.LayoutParams(dp(52), dp(52)))
 
@@ -1043,6 +1113,83 @@ class MainActivity : ComponentActivity() {
         val tab = tabs.getOrNull(activeIndex)
         if (tab != null && isInternal(tab.webView.url) && tab.errorUrl == null) {
             loadHomepage(tab.webView, tab.privateMode)
+        }
+    }
+
+    private fun showWallpaperSheet() {
+        val rows = mutableListOf<SheetRow>()
+        rows.add(SheetRow("Choose image", "Pick a photo from your gallery", { wallpaperPicker.launch("image/*") }))
+        if (hasWallpaper) {
+            rows.add(SheetRow("Remove wallpaper", "Back to the default look", { removeWallpaper() }))
+        }
+        showSheet("Wallpaper", rows, emptyList(), null)
+    }
+
+    private fun wallpaperFile() = File(filesDir, "wallpaper.jpg")
+
+    private fun loadWallpaper() {
+        val f = wallpaperFile()
+        wallpaper = if (f.exists()) {
+            try { BitmapFactory.decodeFile(f.absolutePath) } catch (_: Throwable) { null }
+        } else null
+    }
+
+    private fun exifRotation(stream: java.io.InputStream): Int {
+        return try {
+            val exif = android.media.ExifInterface(stream)
+            when (exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, android.media.ExifInterface.ORIENTATION_NORMAL)) {
+                android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+        } catch (_: Exception) { 0 }
+    }
+
+    private fun importWallpaper(uri: Uri) {
+        Thread {
+            try {
+                val dm = resources.displayMetrics
+                val target = maxOf(dm.widthPixels, dm.heightPixels)
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+                var sample = 1
+                while (bounds.outWidth / (sample * 2) >= target && bounds.outHeight / (sample * 2) >= target) sample *= 2
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                var bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+                    ?: throw IllegalStateException("decode failed")
+                val rotation = contentResolver.openInputStream(uri)?.use { exifRotation(it) } ?: 0
+                if (rotation != 0) {
+                    val m = Matrix()
+                    m.postRotate(rotation.toFloat())
+                    bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                }
+                wallpaperFile().outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                val done = bmp
+                runOnUiThread {
+                    wallpaper = done
+                    applyWallpaperChange()
+                    toast("Wallpaper set")
+                }
+            } catch (_: Throwable) {
+                runOnUiThread { toast("Couldn't set wallpaper") }
+            }
+        }.start()
+    }
+
+    private fun removeWallpaper() {
+        wallpaperFile().delete()
+        wallpaper = null
+        applyWallpaperChange()
+        toast("Wallpaper removed")
+    }
+
+    private fun applyWallpaperChange() {
+        rebuildUi()
+        tabs.forEach { t ->
+            if (t.errorUrl == null && isInternal(t.webView.url)) {
+                loadHomepage(t.webView, t.privateMode)
+            }
         }
     }
 
