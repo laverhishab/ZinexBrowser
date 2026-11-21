@@ -494,6 +494,10 @@ class MainActivity : ComponentActivity() {
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     val uri = request?.url ?: return false
                     val scheme = uri.scheme?.lowercase()
+                    if (scheme == "zinex") {
+                        if (uri.host == "add") showAddShortcutDialog()
+                        return true
+                    }
                     if (scheme == "http" || scheme == "https") return false
                     return try {
                         startActivity(Intent(Intent.ACTION_VIEW, uri)); true
@@ -594,6 +598,11 @@ class MainActivity : ComponentActivity() {
                         hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) && !extra.isNullOrBlank()
                 ) {
                     showImageSheet(extra, privateMode)
+                    true
+                } else if (hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE && !extra.isNullOrBlank() &&
+                    isInternal(url) && findShortcut(extra) != null
+                ) {
+                    showShortcutSheet(extra, privateMode)
                     true
                 } else {
                     false
@@ -877,19 +886,11 @@ class MainActivity : ComponentActivity() {
         } else ""
         val title = if (privateTab) "Private tab" else "Zinex"
         val tagline = if (privateTab) "History isn't saved in this tab" else "Fast. Simple. Yours."
-        val sites = listOf(
-            arrayOf("Google", "https://www.google.com", "#4285F4", "G"),
-            arrayOf("Facebook", "https://www.facebook.com", "#1877F2", "f"),
-            arrayOf("YouTube", "https://www.youtube.com", "#FF0033", "▶"),
-            arrayOf("WhatsApp", "https://web.whatsapp.com", "#25D366", "W"),
-            arrayOf("Gmail", "https://mail.google.com", "#EA4335", "M"),
-            arrayOf("Wikipedia", "https://www.wikipedia.org", "#636B7E", "W"),
-            arrayOf("Instagram", "https://www.instagram.com", "#E1306C", "I"),
-            arrayOf("Maps", "https://maps.google.com", "#34A853", "◉")
-        )
-        val items = sites.joinToString("") { s ->
-            "<a class=\"item\" href=\"${s[1]}\"><div class=\"ico\" style=\"background:${s[2]}\">${s[3]}</div>${s[0]}</a>"
+        val tiles = allShortcuts().joinToString("") { sc ->
+            "<a class=\"item\" href=\"${escapeHtml(sc[1])}\"><div class=\"ico\" style=\"background:${escapeHtml(sc[2])}\">${escapeHtml(sc[3])}</div>${escapeHtml(sc[0])}</a>"
         }
+        val items = tiles +
+            "<a class=\"item\" href=\"zinex://add\"><div class=\"ico\" style=\"background:rgba(127,127,127,.28)\">+</div>Add</a>"
         return """
             <!doctype html><html><head><meta charset="utf-8"><title>Zinex</title>
             <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1069,6 +1070,7 @@ class MainActivity : ComponentActivity() {
             MenuAction("Bookmarks", R.drawable.ic_star, false) { showSavedEntries("Bookmarks", "bookmarks", "No bookmarks yet") },
             MenuAction("History", R.drawable.ic_history, false) { showSavedEntries("History", "history", "No history yet") },
             MenuAction("Add bookmark", R.drawable.ic_star_border, false) { addBookmark() },
+            MenuAction("Pin to home", R.drawable.ic_pin, false) { pinCurrentPage() },
             MenuAction("Downloads", R.drawable.ic_download, false) { openDownloads() },
             MenuAction("Share", R.drawable.ic_share, false) { shareCurrent() },
             MenuAction("Copy link", R.drawable.ic_copy, false) { copyLink() },
@@ -1191,6 +1193,150 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ------------------------------------------------------------ shortcuts
+
+    private val pinnedShortcut = arrayOf("Anabiya Craft", "https://anabiyacraft.shop", "#B8743B", "A")
+
+    private fun defaultShortcuts(): List<Array<String>> = listOf(
+        arrayOf("Google", "https://www.google.com", "#4285F4", "G"),
+        arrayOf("Facebook", "https://www.facebook.com", "#1877F2", "f"),
+        arrayOf("YouTube", "https://www.youtube.com", "#FF0033", "▶"),
+        arrayOf("WhatsApp", "https://web.whatsapp.com", "#25D366", "W"),
+        arrayOf("Gmail", "https://mail.google.com", "#EA4335", "M"),
+        arrayOf("Wikipedia", "https://www.wikipedia.org", "#636B7E", "W"),
+        arrayOf("Instagram", "https://www.instagram.com", "#E1306C", "I"),
+        arrayOf("Maps", "https://maps.google.com", "#34A853", "◉")
+    )
+
+    private fun sameUrl(a: String, b: String) = a.trimEnd('/').equals(b.trimEnd('/'), ignoreCase = true)
+
+    private fun storedShortcuts(): List<Array<String>> {
+        val raw = getSharedPreferences("zinex", MODE_PRIVATE).getString("shortcuts", null) ?: return defaultShortcuts()
+        return raw.split("\n").filter { it.isNotBlank() }.map { it.split("||").toTypedArray() }.filter { it.size >= 4 }
+    }
+
+    private fun saveShortcuts(list: List<Array<String>>) {
+        val raw = list.joinToString("\n") { it.joinToString("||") }
+        getSharedPreferences("zinex", MODE_PRIVATE).edit().putString("shortcuts", raw).apply()
+    }
+
+    private fun allShortcuts(): List<Array<String>> =
+        listOf(pinnedShortcut) + storedShortcuts().filter { !sameUrl(it[1], pinnedShortcut[1]) }
+
+    private fun findShortcut(url: String): Array<String>? = allShortcuts().firstOrNull { sameUrl(it[1], url) }
+
+    private fun escapeHtml(t: String) = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+
+    private fun normalizeShortcutUrl(input: String): String? {
+        var u = input.trim()
+        if (u.isEmpty() || u.contains(' ')) return null
+        if (!u.contains("://")) u = "https://$u"
+        val uri = Uri.parse(u)
+        val scheme = uri.scheme?.lowercase()
+        val host = uri.host
+        if ((scheme != "http" && scheme != "https") || host.isNullOrEmpty() || !host.contains('.')) return null
+        return u
+    }
+
+    private fun addShortcut(title: String, url: String) {
+        if (findShortcut(url) != null) {
+            toast("Already on your home page")
+            return
+        }
+        val host = hostOf(url)
+        val name = title.trim().replace("||", " ").replace("\n", " ").ifBlank { host }.take(24)
+        val palette = listOf("#6C63FF", "#E67E22", "#16A085", "#C0392B", "#2980B9", "#8E44AD", "#D35400", "#2C3E50")
+        val color = palette[Math.abs(host.hashCode()) % palette.size]
+        val glyph = name.first().uppercase()
+        saveShortcuts(storedShortcuts() + listOf(arrayOf(name, url, color, glyph)))
+        toast("Pinned to home")
+        reloadHomeTabs()
+    }
+
+    private fun removeShortcut(url: String) {
+        saveShortcuts(storedShortcuts().filter { !sameUrl(it[1], url) })
+        toast("Removed from home")
+        reloadHomeTabs()
+    }
+
+    private fun pinCurrentPage() {
+        val url = fullUrl()
+        val web = currentWebView()
+        if (url.isEmpty() || web == null) {
+            toast("Open a page first")
+            return
+        }
+        addShortcut(web.title ?: "", url)
+    }
+
+    private fun showShortcutSheet(url: String, privateMode: Boolean) {
+        val sc = findShortcut(url) ?: return
+        if (sameUrl(sc[1], pinnedShortcut[1])) {
+            toast("This shortcut is pinned")
+            return
+        }
+        val rows = listOf(
+            SheetRow("Remove from home", "Delete this shortcut", { removeShortcut(url) }),
+            SheetRow("Open in new tab", hostOf(url), { addTab(false, url, privateMode) })
+        )
+        showSheet(sc[0], rows, emptyList(), null)
+    }
+
+    private fun showAddShortcutDialog() {
+        val dialog = newSheetDialog()
+        val sheet = newSheetContainer()
+
+        val heading = TextView(this)
+        heading.text = "Pin to home"
+        heading.textSize = 18f
+        heading.setTypeface(null, Typeface.BOLD)
+        heading.setTextColor(cText())
+        heading.setPadding(0, 0, 0, dp(10))
+        sheet.addView(heading)
+
+        fun field(hint: String, uri: Boolean): EditText {
+            val e = EditText(this)
+            e.hint = hint
+            e.textSize = 15f
+            e.setTextColor(cText())
+            e.setHintTextColor(cSub())
+            e.setSingleLine(true)
+            e.inputType = if (uri) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI else InputType.TYPE_CLASS_TEXT
+            e.background = rounded(cSurface2(), 14)
+            e.setPadding(dp(14), dp(12), dp(14), dp(12))
+            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp.bottomMargin = dp(10)
+            sheet.addView(e, lp)
+            return e
+        }
+        val nameInput = field("Name (optional)", false)
+        val urlInput = field("Website, e.g. example.com", true)
+
+        val pin = TextView(this)
+        pin.text = "Pin"
+        pin.textSize = 14f
+        pin.gravity = Gravity.CENTER
+        pin.setTypeface(null, Typeface.BOLD)
+        pin.setTextColor(Color.WHITE)
+        pin.background = rounded(accent, 22)
+        pin.setOnClickListener {
+            val url = normalizeShortcutUrl(urlInput.text.toString())
+            if (url == null) {
+                toast("Enter a valid website")
+            } else {
+                dialog.dismiss()
+                addShortcut(nameInput.text.toString(), url)
+            }
+        }
+        sheet.addView(pin, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)))
+
+        showSheetDialog(dialog, sheet)
+        dialog.window?.setSoftInputMode(
+            android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE
+        )
+    }
+
     private fun showWallpaperSheet() {
         val rows = mutableListOf<SheetRow>()
         rows.add(SheetRow("Choose image", "Pick a photo from your gallery", { wallpaperPicker.launch("image/*") }))
@@ -1261,6 +1407,10 @@ class MainActivity : ComponentActivity() {
 
     private fun applyWallpaperChange() {
         rebuildUi()
+        reloadHomeTabs()
+    }
+
+    private fun reloadHomeTabs() {
         tabs.forEach { t ->
             if (t.errorUrl == null && isInternal(t.webView.url)) {
                 loadHomepage(t.webView, t.privateMode)
